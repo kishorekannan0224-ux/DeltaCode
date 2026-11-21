@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
+import nodemailer from 'nodemailer'
 import dotenv from 'dotenv'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -18,17 +19,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const dataDirectory = path.join(__dirname, 'data')
 const enquiriesFile = path.join(dataDirectory, 'enquiries.json')
 
-// Allowed frontend origins
 const allowedOrigins = [
   process.env.CLIENT_ORIGIN,
   'http://localhost:5174',
   'http://localhost:5175'
 ].filter(Boolean)
 
-// Security middleware
 app.use(helmet())
 
-// CORS configuration
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -37,18 +35,26 @@ app.use(cors({
 
 app.use(express.json({ limit: '20kb' }))
 
-// Contact form rate limiter
+// Gmail transporter
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_APP_PASSWORD
+  }
+})
+
 const contactLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 8,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: {
-    message: 'Too many enquiries from this connection. Please try again later.'
+    message: 'Too many enquiries. Please try again later.'
   }
 })
 
-// API health check
+// Health check
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -56,7 +62,7 @@ app.get('/api/health', (req, res) => {
   })
 })
 
-// Contact form API
+// Project enquiry
 app.post('/api/contact', contactLimiter, async (req, res) => {
   try {
     const { name, email, service, message } = req.body || {}
@@ -65,14 +71,11 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
       typeof name !== 'string' ||
       name.trim().length < 2 ||
       name.trim().length > 80 ||
-
       typeof email !== 'string' ||
       email.length > 120 ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-
       typeof service !== 'string' ||
       service.length > 80 ||
-
       typeof message !== 'string' ||
       message.trim().length < 10 ||
       message.length > 2000
@@ -90,30 +93,53 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
       enquiries = JSON.parse(
         await fs.readFile(enquiriesFile, 'utf8')
       )
-
-      if (!Array.isArray(enquiries)) {
-        enquiries = []
-      }
+      if (!Array.isArray(enquiries)) enquiries = []
     } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error
-      }
+      if (error.code !== 'ENOENT') throw error
     }
 
-    enquiries.push({
+    const enquiry = {
       id: crypto.randomUUID(),
       name: name.trim(),
       email: email.trim(),
       service: service.trim(),
       message: message.trim(),
       createdAt: new Date().toISOString()
-    })
+    }
+
+    enquiries.push(enquiry)
 
     await fs.writeFile(
       enquiriesFile,
       JSON.stringify(enquiries, null, 2),
       { mode: 0o600 }
     )
+
+    // Send email notification
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_USER,
+        to: process.env.ENQUIRY_TO,
+        replyTo: enquiry.email,
+        subject: `New Project Enquiry - ${enquiry.service}`,
+        text: `
+New Project Enquiry - DeltaCode
+
+Name: ${enquiry.name}
+Email: ${enquiry.email}
+Service: ${enquiry.service}
+
+Message:
+${enquiry.message}
+
+Received: ${enquiry.createdAt}
+        `
+      })
+
+      console.log('Enquiry email sent successfully.')
+    } catch (emailError) {
+      console.error('Gmail sending failed:', emailError.message)
+    }
 
     return res.status(201).json({
       message: 'Enquiry received successfully.'
@@ -133,7 +159,6 @@ app.get('/', (req, res) => {
   res.send('Welcome to DeltaCode API 🚀')
 })
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`DeltaCode API running at http://localhost:${PORT}`)
+  console.log(`DeltaCode API running on port ${PORT}`)
 })
