@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
-import nodemailer from 'nodemailer'
+import { Resend } from 'resend'
 import dotenv from 'dotenv'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -18,6 +18,9 @@ const PORT = process.env.PORT || 5000
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const dataDirectory = path.join(__dirname, 'data')
 const enquiriesFile = path.join(dataDirectory, 'enquiries.json')
+
+// Resend configuration
+const resend = new Resend(process.env.RESEND_API_KEY)
 
 const allowedOrigins = [
   process.env.CLIENT_ORIGIN,
@@ -34,15 +37,6 @@ app.use(cors({
 }))
 
 app.use(express.json({ limit: '20kb' }))
-
-// Gmail transporter
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_APP_PASSWORD
-  }
-})
 
 const contactLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -93,7 +87,10 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
       enquiries = JSON.parse(
         await fs.readFile(enquiriesFile, 'utf8')
       )
-      if (!Array.isArray(enquiries)) enquiries = []
+
+      if (!Array.isArray(enquiries)) {
+        enquiries = []
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error
     }
@@ -115,11 +112,11 @@ app.post('/api/contact', contactLimiter, async (req, res) => {
       { mode: 0o600 }
     )
 
-    // Send email notification
+    // Send email notification using Resend
     try {
-      await transporter.sendMail({
-        from: process.env.SMTP_USER,
-        to: process.env.ENQUIRY_TO,
+      const { data, error } = await resend.emails.send({
+        from: process.env.RESEND_FROM || 'DeltaCode <onboarding@resend.dev>',
+        to: [process.env.ENQUIRY_TO],
         replyTo: enquiry.email,
         subject: `New Project Enquiry - ${enquiry.service}`,
         text: `
@@ -136,9 +133,13 @@ Received: ${enquiry.createdAt}
         `
       })
 
-      console.log('Enquiry email sent successfully.')
+      if (error) {
+        console.error('Resend email failed:', error)
+      } else {
+        console.log('Enquiry email sent successfully. ID:', data?.id)
+      }
     } catch (emailError) {
-      console.error('Gmail sending failed:', emailError.message)
+      console.error('Resend email error:', emailError.message)
     }
 
     return res.status(201).json({
